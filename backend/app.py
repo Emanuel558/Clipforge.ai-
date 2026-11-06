@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID, uuid4
 import json
+import asyncio
 import logging
 import math
 import os
@@ -12,12 +13,16 @@ import sqlite3
 import subprocess
 import threading
 import time
+import sys
+
+from . import uploads
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import ClientDisconnect
 
 log = logging.getLogger(__name__)
 DATA = Path(os.environ.get('CLIPFORGE_DATA', 'data')).resolve()
@@ -69,6 +74,7 @@ async def lifespan(app):
         if not shutil.which(program):
             raise RuntimeError(f'{program} is missing. Follow README.md setup instructions.')
     init_db()
+    uploads.initialize(sys.modules[__name__])
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='media')
     yield
     pool.shutdown(wait=True, cancel_futures=True)
@@ -111,6 +117,8 @@ def inspect_media(path):
         if width < 2 or height < 2 or max(width, height) > 4096:
             raise HTTPException(422, 'Use a video with dimensions up to 4096 pixels.')
         return duration, width, height, video, info['streams']
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, 'Video inspection timed out. Try a different MP4 or check server load.') from None
     except (subprocess.SubprocessError, ValueError, KeyError, StopIteration):
         raise HTTPException(422, 'This file is not a readable MP4 video. Try another MP4 file.') from None
 
@@ -192,7 +200,11 @@ async def upload(request: Request, filename: str = 'video.mp4'):
     name = Path(filename.replace('\\', '/')).name[:200]
     if not name.lower().endswith('.mp4'):
         raise HTTPException(415, 'Choose an MP4 video.')
-    if int(request.headers.get('content-length', '0')) > MAX_BYTES:
+    try:
+        length = int(request.headers.get('content-length', '0'))
+    except ValueError:
+        raise HTTPException(400, 'Invalid upload length.') from None
+    if length > MAX_BYTES:
         raise HTTPException(413, 'The upload limit is 1 GB.')
     pid = str(uuid4())
     folder = DATA / pid
@@ -200,7 +212,12 @@ async def upload(request: Request, filename: str = 'video.mp4'):
     size = 0
     try:
         with (folder / 'source.mp4').open('wb') as file:
-            async for chunk in request.stream():
+            iterator = request.stream().__aiter__()
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(anext(iterator), uploads.IDLE_SECONDS)
+                except StopAsyncIteration:
+                    break
                 size += len(chunk)
                 if size > MAX_BYTES:
                     raise HTTPException(413, 'The upload limit is 1 GB.')
@@ -215,6 +232,12 @@ async def upload(request: Request, filename: str = 'video.mp4'):
                     (pid, name, duration, width, height, size, time.time(), 'processing', duration))
             pool.submit(prepare_video, pid, needs_preview)
         return get_project(pid)
+    except (TimeoutError, ClientDisconnect):
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(408, 'Upload stalled or disconnected. Reload the app and resume with the chunked uploader.') from None
+    except OSError as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise uploads.disk_error(exc) from None
     except BaseException:
         shutil.rmtree(folder, ignore_errors=True)
         raise
@@ -300,6 +323,10 @@ def delete_project(pid: str):
         with db() as connection:
             connection.execute('DELETE FROM exports WHERE project_id=?', (pid,))
             connection.execute('DELETE FROM projects WHERE id=?', (pid,))
+            connection.execute('DELETE FROM uploads WHERE id=?', (pid,))
+
+
+uploads.install(app, sys.modules[__name__])
 
 
 # Production-style local serving: npm run build, then start only FastAPI.

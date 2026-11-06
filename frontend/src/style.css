@@ -1737,3 +1737,21 @@ footer > span:last-child {
     transition: none !important;
   }
 }
+
+.upload-status .upload-detail {
+  font-size: 10px;
+  line-height: 1.7;
+  margin-top: 10px;
+  color: #b3a1c5;
+}
+.upload-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+}
+.upload-actions .text-button {
+  margin-top: 0;
+}

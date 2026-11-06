@@ -28,7 +28,17 @@ import "@fontsource/manrope/500.css";
 import "@fontsource/manrope/600.css";
 import "@fontsource/manrope/700.css";
 import "@fontsource/manrope/800.css";
+import { fingerprint, jsonRequest, STORAGE_KEY, uploadVideo } from "./upload";
+import type { SavedUpload, UploadProgress } from "./upload";
 import "./style.css";
+
+function readSavedUpload(): SavedUpload | null {
+  try {
+    return JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
 
 type Project = {
   id: string;
@@ -81,7 +91,15 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadState, setUploadState] = useState<UploadProgress | null>(null);
+  const [savedUpload, setSavedUpload] = useState<SavedUpload | null>(
+    readSavedUpload,
+  );
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const savedUploadRef = useRef(savedUpload);
+  const uploadProgress = uploadState
+    ? Math.floor((uploadState.confirmed / uploadState.total) * 100)
+    : 0;
   const [uploadName, setUploadName] = useState("");
   const [dragging, setDragging] = useState(false);
   const [exports, setExports] = useState<Export[]>([]);
@@ -93,7 +111,7 @@ function App() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const player = useRef<HTMLVideoElement>(null);
-  const uploadRequest = useRef<XMLHttpRequest | null>(null);
+  const uploadRequest = useRef<AbortController | null>(null);
   const selected = projects.find((project) => project.id === selectedId);
   const activeExport = exports.find((item) =>
     ["queued", "rendering"].includes(item.status),
@@ -187,8 +205,42 @@ function App() {
     setError("");
     setPage("editor");
   }
-  function upload(file?: File) {
-    if (!file || busy) return;
+  function rememberUpload(value: SavedUpload | null) {
+    savedUploadRef.current = value;
+    setSavedUpload(value);
+    try {
+      if (value) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+      else sessionStorage.removeItem(STORAGE_KEY);
+    } catch {
+      /* Resume still works in this page when browser storage is unavailable. */
+    }
+  }
+  async function discardUpload() {
+    if (busy || !savedUploadRef.current) return;
+    setError("");
+    try {
+      await jsonRequest(
+        `/api/uploads/${savedUploadRef.current.id}`,
+        new AbortController().signal,
+        { method: "DELETE" },
+      );
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !("status" in error) ||
+        ![404, 410].includes(Number(error.status))
+      ) {
+        setError((error as Error).message);
+        return;
+      }
+    }
+    rememberUpload(null);
+    setUploadFile(null);
+    setUploadState(null);
+    setUploadName("");
+  }
+  async function upload(file?: File) {
+    if (!file || uploadRequest.current) return;
     setError("");
     if (!file.name.toLowerCase().endsWith(".mp4")) {
       setError("Choose an MP4 video to continue.");
@@ -198,57 +250,63 @@ function App() {
       setError("Your file exceeds the 1 GB upload limit.");
       return;
     }
-    if (file.size === 0) {
+    if (!file.size) {
       setError("This file is empty. Choose another video.");
       return;
     }
+    if (
+      savedUploadRef.current &&
+      savedUploadRef.current.fingerprint !== fingerprint(file)
+    ) {
+      setError(
+        "A different upload is saved. Resume the same file, or discard the saved upload first.",
+      );
+      setPage("upload");
+      return;
+    }
+    const controller = new AbortController();
+    uploadRequest.current = controller;
     setBusy(true);
-    setUploadProgress(0);
+    setUploadFile(file);
     setUploadName(file.name);
     setPage("upload");
-    const xhr = new XMLHttpRequest();
-    uploadRequest.current = xhr;
-    xhr.open("POST", `/api/projects?filename=${encodeURIComponent(file.name)}`);
-    xhr.setRequestHeader("Content-Type", "application/octet-stream");
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable)
-        setUploadProgress(Math.round((event.loaded / event.total) * 100));
-    };
-    xhr.onload = () => {
-      uploadRequest.current = null;
-      setBusy(false);
-      let body: { detail?: string } & Partial<Project> = {};
-      try {
-        body = JSON.parse(xhr.responseText);
-      } catch {
-        /* Non-JSON proxy failure. */
-      }
-      if (xhr.status >= 200 && xhr.status < 300 && body.id) {
-        const project = body as Project;
-        setProjects((items) => [
-          project,
-          ...items.filter((item) => item.id !== project.id),
-        ]);
-        open(project);
-      } else
-        setError(
-          typeof body.detail === "string"
-            ? body.detail
-            : "Upload failed. Check your connection and try again.",
+    setUploadState({
+      phase: "connecting",
+      message: "Checking saved progress…",
+      confirmed: 0,
+      transferred: 0,
+      total: file.size,
+      bytesPerSecond: 0,
+    });
+    try {
+      const project = await uploadVideo<Project>(file, {
+        signal: controller.signal,
+        saved: savedUploadRef.current,
+        remember: rememberUpload,
+        progress: setUploadState,
+      });
+      setProjects((items) => [
+        project,
+        ...items.filter((item) => item.id !== project.id),
+      ]);
+      setUploadFile(null);
+      setUploadState(null);
+      open(project);
+    } catch (error) {
+      if (controller.signal.aborted) {
+        setUploadState(
+          (previous) =>
+            previous && {
+              ...previous,
+              message:
+                "Paused. Confirmed chunks stay saved. Resume when ready.",
+            },
         );
-    };
-    xhr.onerror = () => {
+      } else setError((error as Error).message);
+    } finally {
       uploadRequest.current = null;
       setBusy(false);
-      setError("Upload interrupted. Check your connection and try again.");
-    };
-    xhr.onabort = () => {
-      uploadRequest.current = null;
-      setBusy(false);
-      setUploadProgress(0);
-      setError("Upload cancelled. Choose a video to try again.");
-    };
-    xhr.send(file);
+    }
   }
   async function exportVideo() {
     if (!selected || !validTrim || activeExport || exportSubmitting) return;
@@ -604,39 +662,88 @@ function App() {
                   <span className="pill">YOUR FOOTAGE, YOUR STORY</span>
                   <h2>
                     {busy
-                      ? uploadProgress >= 100
-                        ? "Checking your video…"
+                      ? uploadState?.phase === "validating"
+                        ? "Checking your saved video…"
                         : "Your video is on the way"
-                      : "Drop your video here"}
+                      : savedUpload
+                        ? "Resume your upload"
+                        : "Drop your video here"}
                   </h2>
                   <p>
-                    {busy
-                      ? uploadName
+                    {busy || savedUpload
+                      ? uploadName ||
+                        "Choose the same MP4 to recover saved progress."
                       : "Drag and drop an MP4, or choose a file from your computer."}
                   </p>
-                  {busy ? (
-                    <div className="upload-status" role="status">
+                  {(busy || savedUpload) && (
+                    <div className="upload-status">
                       <div className="progress-label">
                         <span>
-                          {uploadProgress >= 100
-                            ? "Upload complete. Validating media…"
-                            : "Uploading video"}
+                          {uploadState?.phase === "validating"
+                            ? "Saved to workspace"
+                            : "Confirmed by workspace"}
                         </span>
-                        <b>{uploadProgress}%</b>
+                        <b>
+                          {uploadState
+                            ? `${uploadProgress}%`
+                            : "Resume to check"}
+                        </b>
                       </div>
-                      <progress
-                        value={uploadProgress}
-                        max="100"
-                        aria-label="Upload progress"
-                      />
-                      <button
-                        className="text-button"
-                        onClick={() => uploadRequest.current?.abort()}
-                      >
-                        Cancel upload
-                      </button>
+                      {uploadState && (
+                        <progress
+                          value={uploadProgress}
+                          max="100"
+                          aria-label="Confirmed upload progress"
+                        />
+                      )}
+                      {uploadState && (
+                        <p className="upload-detail">
+                          {size(uploadState.confirmed)} saved of{" "}
+                          {size(uploadState.total)}
+                        </p>
+                      )}
+                      {busy && uploadState?.phase === "uploading" && (
+                        <p className="upload-detail">
+                          {size(uploadState.transferred)} sent ·{" "}
+                          {uploadState.bytesPerSecond > 0
+                            ? `${(uploadState.bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s · about ${Math.ceil(Math.max(0, uploadState.total - uploadState.transferred) / uploadState.bytesPerSecond / 60)} min left`
+                            : "Estimating speed…"}
+                        </p>
+                      )}
+                      <p className="upload-detail" role="status">
+                        {uploadState?.message ||
+                          "Saved uploads expire after 24 hours. Select the original file to resume."}
+                      </p>
+                      {busy ? (
+                        <button
+                          className="text-button"
+                          onClick={() => uploadRequest.current?.abort()}
+                        >
+                          Pause upload
+                        </button>
+                      ) : (
+                        <div className="upload-actions">
+                          <button
+                            className="secondary"
+                            onClick={() =>
+                              uploadFile
+                                ? void upload(uploadFile)
+                                : input.current?.click()
+                            }
+                          >
+                            Resume upload
+                          </button>
+                          <button
+                            className="text-button"
+                            onClick={() => void discardUpload()}
+                          >
+                            Discard saved upload
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  ) : (
+                  )}
+                  {!busy && !savedUpload && (
                     <>
                       <button
                         className="primary"

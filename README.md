@@ -17,7 +17,7 @@ Nothing needs installing on your school computer. The tools below run inside a G
    ```
 
 5. Open the **Ports** tab. Find port **5173**, then choose **Open in Browser**. Keep port visibility **Private**. Port 8000 stays internal.
-6. Click **New project** and upload a short MP4 from your computer.
+6. Click **New project** and upload a short MP4 from your computer. Larger files transfer in small resumable chunks. The percentage shows bytes saved by the server.
 7. Wait for preparation. In the editor, play the video. Enter start `1` and end `3` for a video longer than three seconds. Click **Preview selection**.
 8. Click **Export clip**. Wait for the progress bar, then click **Download**. Play the downloaded two-second MP4 and check the picture and sound.
 9. Return to the dashboard. Reload the page and reopen the project. Export history and the last submitted trim remain saved.
@@ -41,7 +41,7 @@ In the left file explorer, expand `data`. Right-click `demo.mp4` and select **Do
 
 - **Setup failed:** run `bash scripts/setup.sh` in the Codespace terminal. If FFmpeg is missing, run `sudo apt-get update && sudo apt-get install -y ffmpeg`, then run setup again.
 - **The app is not opening:** confirm `npm run dev` is running. Open port 5173 through the Ports tab, rather than typing localhost into your school browser.
-- **Upload failed:** use an MP4 under 1 GB and 30 minutes, with dimensions up to 4096 pixels. Start with a small sample.
+- **Upload failed:** use an MP4 under 1 GB and 30 minutes, with dimensions up to 4096 pixels. Confirm the Codespace is running and the port is private. Press **Resume upload** to continue saved chunks. After a page reload, choose the same original file again. Use **Discard saved upload** before selecting a different file.
 - **Preview is preparing:** leave the project open. Incompatible MP4 codecs need a browser-friendly copy, which takes additional processing time.
 - **Export failed:** read the displayed message and try a shorter selection. Server details appear in the terminal. Keep the Codespace running until the export finishes.
 - **Server restarted:** interrupted jobs show an error. Submit the export again, or reupload an interrupted preparation.
@@ -50,7 +50,7 @@ In the left file explorer, expand `data`. Right-click `demo.mp4` and select **Do
 ## Included in Phase 1
 
 - Dashboard with real project information and thumbnails.
-- Upload page with drag-and-drop, file selection, progress and cancellation.
+- Upload page with drag-and-drop, file selection, confirmed progress, pause and resume.
 - MP4 inspection and browser preview, including byte-range seeking.
 - Start and end controls in seconds, plus playhead shortcuts.
 - Selection playback and a visual selection strip.
@@ -104,16 +104,17 @@ Open `http://localhost:8000`. Restart FastAPI after rebuilding frontend assets.
 
 ```bash
 .venv/bin/python -m pytest backend/tests -q
+npm --prefix frontend test
 npm run build
 ```
 
 Tests create temporary sample footage, upload through the API, export an actual trimmed MP4, inspect codecs and duration, compare audio/video timing, verify trim boundaries using a scene change, and test seeking, invalid files, invalid times, failed-job retry, deletion and restart recovery.
 
-The pull-request workflow runs these checks on GitHub. See [the manual browser checklist](docs/TESTING.md) for interface checks.
+The pull-request workflow runs the normal backend tests, frontend transport tests and build on GitHub. The full-volume 676 MiB test is opt-in, with its command in docs/TESTING.md. See [the manual browser checklist](docs/TESTING.md) for interface checks.
 
 ## Data and development limits
 
-Files and metadata live under `data/` on the processing machine. Set `CLIPFORGE_DATA` to change this location before starting the server. Uploads remain until the project is deleted. Interrupted uploads are removed when the request exits. After a machine crash, inspect the data directory for orphaned upload folders.
+Files and metadata live under `data/` on the processing machine. Upload sessions live under `data/uploads/` and expire after 24 hours without saved activity. Startup and new upload creation remove expired sessions. Pausing retains confirmed chunks, while discarding removes them. Browser resume metadata stays in the same tab through reload, and the original file must be selected again after reload. Set `CLIPFORGE_DATA` to change this location before starting the server. Uploads remain until the project is deleted. An interrupted chunk is removed when its request exits. Previously confirmed chunks remain resumable. The older single-request API remains for compatibility and cleans incomplete requests on exit. After a machine crash, inspect the data directory for orphaned upload folders.
 
 A Codespace is a development machine, separate from permanent hosting. Deleting the Codespace removes its uncommitted data. Download useful exports before deleting the environment. No automatic backup or retention service runs.
 
@@ -124,3 +125,13 @@ Keep forwarded ports private. This version has no user accounts or project isola
 ## License
 
 Project source uses the MIT license. Dependencies, bundled fonts and the installed FFmpeg build retain their own licenses. FFmpeg build options and codecs affect redistribution terms. See [FFmpeg licensing](https://ffmpeg.org/legal.html).
+
+## Large-upload behavior
+
+Uploads use 4 MiB requests, bounded retries and durable server receipts. The app retries interrupted requests up to three times with increasing waits, and checks the saved offset before resending. A lost response does not duplicate saved bytes. The browser never loads the whole video into a JavaScript buffer.
+
+No upload progress or receipt for 90 seconds stops the current browser request. The server also bounds chunk inactivity to 90 seconds and total chunk receipt time to ten minutes. Each browser chunk request has a ten-minute absolute limit, and metadata requests have a 30-second response timeout. These are per-request limits, rather than a total-video upload deadline.
+
+Sent bytes, saved bytes, speed and an estimated remaining transfer time are shown separately. Video inspection runs in the media worker after transfer, outside the upload request. A video check still pending after 30 minutes stops browser polling with instructions to resume or check the dashboard. Server processing keeps running.
+
+The API checks available disk space before accepting a new session and gives readable disk-full, timeout, access and proxy errors. Keep room for previews and exports. A preparation error is separate from a transfer failure.
