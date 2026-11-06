@@ -1,7 +1,7 @@
 ClipForge AI Project Plan
 Date: 6 November 2026
 Repository: Emanuel558/Clipforge.ai-
-Status: Proposed. Awaiting owner approval before application development.
+Status: Approved on 6 November 2026. Phase 0 and Phase 1 in development. Phase 2 is excluded from this implementation.
 
 Repository inspection
 The repository was cloned and inspected on 6 November 2026.
@@ -145,10 +145,11 @@ A browser development environment is separate from production hosting.
 I don't know processing speed, monthly hosting cost or highlight quality before measuring representative videos.
 Avoid delivery promises until the first complete workflow has been measured.
 
-Proposed next action after approval
-Begin Phase 0, then Phase 1.
+Current implementation scope
+The owner approved Phase 0 and Phase 1 on 6 November 2026.
 Build and verify one upload-to-export workflow before adding AI features.
-No application code, dependency installation or deployment is authorized by this planning document alone.
+See docs/PHASE_0.md for environment decisions, README.md for browser setup, and docs/TESTING.md for the manual test checklist.
+Phase 2 requires a separate instruction after Phase 1 works.
 
 Reference projects
 React: https://github.com/facebook/react

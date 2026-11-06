@@ -1,0 +1,8 @@
+{
+  "name": "clipforge",
+  "private": true,
+  "scripts": {
+    "dev": "bash scripts/dev.sh",
+    "build": "npm --prefix frontend run build"
+  }
+}
